@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stock Watcher</title>
+    <style>
+        :root {
+            --bg-color: #0d0d0d;
+            --panel-bg: #1a1a1a;
+            --text-main: #e0e0e0;
+            --accent-color: #00ff41; /* Hacker Green */
+            --accent-dim: #008f11;
+            --clock-color: #00e5ff; /* Cyan */
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+        }
+
+        /* --- CLOCK SECTION --- */
+        #clock-container {
+            margin-bottom: 40px;
+            text-align: center;
+        }
+
+        #clock {
+            font-size: 5rem;
+            font-weight: bold;
+            color: var(--clock-color);
+            text-shadow: 0 0 10px rgba(0, 229, 255, 0.5);
+            letter-spacing: 5px;
+        }
+
+        #date {
+            font-size: 1.2rem;
+            color: #888;
+            margin-top: 5px;
+        }
+
+        /* --- STOCK SECTION --- */
+        #stock-list {
+            width: 100%;
+            max-width: 600px;
+            display: grid;
+            gap: 15px;
+        }
+
+        .stock-card {
+            background-color: var(--panel-bg);
+            border-left: 5px solid #555;
+            padding: 15px 25px;
+            border-radius: 5px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+
+        .stock-card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 12px rgba(0,0,0,0.5);
+        }
+
+        .stock-info h2 {
+            margin: 0;
+            font-size: 1.8rem;
+            color: var(--text-main);
+        }
+
+        .stock-info span {
+            font-size: 0.9rem;
+            color: #888;
+        }
+
+        .stock-price {
+            text-align: right;
+        }
+
+        .current-price {
+            font-size: 2rem;
+            font-weight: bold;
+            display: block;
+        }
+
+        .diff {
+            font-size: 1rem;
+            margin-top: 5px;
+            display: block;
+        }
+
+        /* Loading / Status */
+        .loading { color: #aaa; font-style: italic; }
+        .error { color: #ff3333; font-size: 0.8rem; }
+
+        /* Color utils */
+        .up { color: #00ff41; border-color: #00ff41 !important; }
+        .down { color: #ff3333; border-color: #ff3333 !important; }
+        .stay { color: #e0e0e0; border-color: #e0e0e0 !important; }
+
+        /* Footer */
+        footer {
+            margin-top: auto;
+            padding-top: 40px;
+            font-size: 0.8rem;
+            color: #555;
+        }
+        
+        button#refresh-btn {
+            background: transparent;
+            border: 1px solid #555;
+            color: #888;
+            padding: 5px 15px;
+            cursor: pointer;
+            border-radius: 4px;
+            margin-top: 20px;
+        }
+        button#refresh-btn:hover {
+            border-color: var(--accent-color);
+            color: var(--accent-color);
+        }
+
+    </style>
+
+    <!-- PWA Settings -->
+    <link rel="manifest" href="manifest.json">
+    <link rel="icon" type="image/png" href="icon-192.png">
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('service-worker.js');
+        }
+    </script>
+</head>
+<body>
+
+    <div id="clock-container">
+        <div id="clock">--:--:--</div>
+        <div id="date">----/--/--</div>
+    </div>
+
+    <div id="stock-list">
+        <!-- JS will populate this -->
+    </div>
+    
+    <button id="refresh-btn">Force Refresh</button>
+
+    <footer>
+        Data source: Yahoo! Finance (via AllOrigins)
+    </footer>
+
+<script>
+    // --- Configuration ---
+    const STOCKS = [
+        { code: '4565', name: 'そーせい' }, // 最新の社名はSosei Heptares等確認必要だがコードベースで
+        { code: '3863', name: '日本製紙' },
+        { code: '7974', name: '任天堂' }
+    ];
+
+    const REFRESH_INTERVAL = 30000; // 30 seconds
+
+    // --- Clock Logic ---
+    function updateClock() {
+        const now = new Date();
+        const timeStr = now.toLocaleTimeString('ja-JP', { hour12: false });
+        const dateStr = now.toLocaleDateString('ja-JP', { year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short' });
+        
+        document.getElementById('clock').textContent = timeStr;
+        document.getElementById('date').textContent = dateStr;
+    }
+    setInterval(updateClock, 1000);
+    updateClock();
+
+    // --- Stock Logic ---
+    const stockListEl = document.getElementById('stock-list');
+
+    function initStockCards() {
+        stockListEl.innerHTML = '';
+        STOCKS.forEach(stock => {
+            const card = document.createElement('div');
+            card.className = 'stock-card stay';
+            card.id = `card-${stock.code}`;
+            card.innerHTML = `
+                <div class="stock-info">
+                    <h2>${stock.code}</h2>
+                    <span class="stock-name">${stock.name}</span>
+                </div>
+                <div class="stock-price">
+                    <span class="current-price loading">---</span>
+                    <span class="diff"></span>
+                </div>
+            `;
+            stockListEl.appendChild(card);
+        });
+    }
+
+    async function fetchStockData(code) {
+        // Yahoo! Finance text-based scraping logic adapted for JS
+        // We use AllOrigins to bypass CORS
+        // Original logic: curl https://finance.yahoo.co.jp/cm/message/100<code...
+        // But scraping raw HTML via proxy is heavy and fragile. 
+        // Better target: https://finance.yahoo.co.jp/quote/<CODE>.T
+        
+        const targetUrl = `https://finance.yahoo.co.jp/quote/${code}.T`;
+        const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`;
+
+        try {
+            const response = await fetch(proxyUrl);
+            const data = await response.json();
+            const html = data.contents;
+
+            // Simple Regex scraping (Fragile but works for now)
+            // Looking for <span class="_3rXWJKZF">2,345</span> kind of patterns near price
+            // Yahoo Finance HTML structure changes often.
+            // Let's try to find the main price.
+            // Typically inside: <span class="StyledNumber__value..._3rXWJKZF">
+            
+            // Strategy: Look for "現在値" or large number near the top?
+            // Yahoo Finance Mobile/PC specific.
+            // Let's assume the DOM structure contains a distinct class for the main price.
+            
+            // NOTE: Parsing full HTML with DOMParser is safer than Regex
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(html, 'text/html');
+            
+            // 2024ish Selector for Yahoo Finance Japan
+            // This class name `_3rXWJKZF` is common for large price text, but might change.
+            // Alternative: select header info
+            let priceText = "---";
+            let diffText = "";
+            let isPlus = false;
+            let isMinus = false;
+
+            // Try selector 1 (Common large price)
+            const priceEl = doc.querySelector('span[class*="StyledNumber__value"]');
+            
+            if (priceEl) {
+                priceText = priceEl.innerText;
+            } else {
+                // Fallback: Try searching meta tags or generic sequence
+                // Often inside <h1 ...> or nearby
+                throw new Error("Parse Error");
+            }
+
+            // Clean up price (remove commas)
+            // priceText = priceText.replace(/,/g, '');
+
+            // Try to find diff (前日比)
+            // Usually next to price
+            const diffEl = doc.querySelector('span[class*="StyledNumber__diff"]');
+            if (diffEl) {
+                diffText = diffEl.innerText; // e.g. "+100" or "-50"
+                if (diffText.includes('+')) isPlus = true;
+                if (diffText.includes('-')) isMinus = true;
+            }
+
+            return { success: true, price: priceText, diff: diffText, isPlus, isMinus };
+
+        } catch (error) {
+            console.error(`Error fetching ${code}:`, error);
+            return { success: false, error: "Load Failed" };
+        }
+    }
+
+    async function updateAllStocks() {
+        for (const stock of STOCKS) {
+            const card = document.getElementById(`card-${stock.code}`);
+            const priceEl = card.querySelector('.current-price');
+            const diffEl = card.querySelector('.diff');
+
+            // Indicate updating?
+            priceEl.style.opacity = 0.5;
+
+            const result = await fetchStockData(stock.code);
+
+            priceEl.style.opacity = 1;
+
+            if (result.success) {
+                priceEl.textContent = result.price;
+                priceEl.classList.remove('loading', 'error');
+                
+                diffEl.textContent = result.diff;
+
+                // Color coding
+                card.classList.remove('up', 'down', 'stay');
+                if (result.isPlus) card.classList.add('up');
+                else if (result.isMinus) card.classList.add('down');
+                else card.classList.add('stay');
+
+            } else {
+                priceEl.textContent = "Err";
+                priceEl.classList.add('error');
+            }
+            
+            // Be nice to the API
+            await new Promise(r => setTimeout(r, 1000));
+        }
+    }
+
+    // --- Start ---
+    initStockCards();
+    updateAllStocks(); // Initial load
+    
+    // Auto Refresh
+    setInterval(updateAllStocks, REFRESH_INTERVAL);
+
+    // Manual Refresh
+    document.getElementById('refresh-btn').addEventListener('click', updateAllStocks);
+
+</script>
+</body>
+</html>
