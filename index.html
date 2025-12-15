@@ -203,61 +203,79 @@
     }
 
     async function fetchStockData(code) {
-        // Yahoo! Finance text-based scraping logic adapted for JS
-        // We use AllOrigins to bypass CORS
-        // Original logic: curl https://finance.yahoo.co.jp/cm/message/100<code...
-        // But scraping raw HTML via proxy is heavy and fragile. 
-        // Better target: https://finance.yahoo.co.jp/quote/<CODE>.T
-        
         const targetUrl = `https://finance.yahoo.co.jp/quote/${code}.T`;
-        const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}`;
+        // キャッシュバスティングのためにタイムスタンプを追加
+        const proxyUrl = `https://api.allorigins.win/get?url=${encodeURIComponent(targetUrl)}&timestamp=${new Date().getTime()}`;
 
         try {
             const response = await fetch(proxyUrl);
             const data = await response.json();
+            
+            if (!data.contents) throw new Error("No content received");
+            
             const html = data.contents;
-
-            // Simple Regex scraping (Fragile but works for now)
-            // Looking for <span class="_3rXWJKZF">2,345</span> kind of patterns near price
-            // Yahoo Finance HTML structure changes often.
-            // Let's try to find the main price.
-            // Typically inside: <span class="StyledNumber__value..._3rXWJKZF">
             
-            // Strategy: Look for "現在値" or large number near the top?
-            // Yahoo Finance Mobile/PC specific.
-            // Let's assume the DOM structure contains a distinct class for the main price.
+            // --- Improved Scraping Logic ---
+            // Yahoo Finance JP often puts the main price in a React root or specific meta tags.
+            // But raw HTML via proxy might be just the initial SSR HTML.
             
-            // NOTE: Parsing full HTML with DOMParser is safer than Regex
-            const parser = new DOMParser();
-            const doc = parser.parseFromString(html, 'text/html');
+            // Method A: Look for specific React props/JSON embedded in script (Most reliable if available)
+            // Method B: Broad Regex for price presentation
             
-            // 2024ish Selector for Yahoo Finance Japan
-            // This class name `_3rXWJKZF` is common for large price text, but might change.
-            // Alternative: select header info
+            // Let's try Regex for the visual price first as it's simpler for a single file.
+            // Target: <span class="StyledNumber__value...">(number)</span>
+            // Since class names change (hashed), we look for the structure around the large number.
+            
             let priceText = "---";
-            let diffText = "";
+            let diffText = "---";
             let isPlus = false;
             let isMinus = false;
 
-            // Try selector 1 (Common large price)
-            const priceEl = doc.querySelector('span[class*="StyledNumber__value"]');
+            // 1. Try to find the large price number. 
+            // Usually it matches format: >1,234.5< or >1,234<
+            // And it appears early in the body for the main quote.
             
-            if (priceEl) {
-                priceText = priceEl.innerText;
+            // Pattern: Find "StyledNumber__value" then capture content
+            const priceMatch = html.match(/class="[^"]*StyledNumber__value[^"]*">([0-9,.]+)<\/span>/);
+            
+            if (priceMatch && priceMatch[1]) {
+                priceText = priceMatch[1];
             } else {
-                // Fallback: Try searching meta tags or generic sequence
-                // Often inside <h1 ...> or nearby
-                throw new Error("Parse Error");
+                // Fallback: Look for <h1 ...>Stock Name</h1> ... <span>PRICE</span>
+                // This is hard without DOM. Let's try DOMParser again but with loose queries.
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(html, 'text/html');
+                
+                // Try selecting by hierarchy which is less likely to change
+                // #main > ... > header > ...
+                // Often the first large number is the price.
+                const spans = Array.from(doc.querySelectorAll('span'));
+                // Find a span that looks like a stock price (digits, maybe comma, no text)
+                // And has a large font size class or is near the top.
+                
+                // Heuristic: The price is usually the first "StyledNumber__value" class element
+                const valEl = doc.querySelector('[class*="StyledNumber__value"]');
+                if (valEl) {
+                    priceText = valEl.innerText;
+                } else {
+                    // Last resort: Regex for raw digits near "現在値" (Genzai-chi)
+                    // Unfortunately "現在値" text is often hidden or in label.
+                    throw new Error("Price pattern not found");
+                }
             }
 
-            // Clean up price (remove commas)
-            // priceText = priceText.replace(/,/g, '');
-
-            // Try to find diff (前日比)
-            // Usually next to price
-            const diffEl = doc.querySelector('span[class*="StyledNumber__diff"]');
+            // 2. Diff (前日比)
+            // Pattern: class="...StyledNumber__diff..."
+            // It might contain "Icon" spans inside, so innerText is better.
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(html, 'text/html');
+            const diffEl = doc.querySelector('[class*="StyledNumber__diff"]');
+            
             if (diffEl) {
-                diffText = diffEl.innerText; // e.g. "+100" or "-50"
+                diffText = diffEl.innerText;
+                // Clean up newlines or spaces
+                diffText = diffText.replace(/\s+/g, '').trim();
+                
                 if (diffText.includes('+')) isPlus = true;
                 if (diffText.includes('-')) isMinus = true;
             }
@@ -265,8 +283,9 @@
             return { success: true, price: priceText, diff: diffText, isPlus, isMinus };
 
         } catch (error) {
-            console.error(`Error fetching ${code}:`, error);
-            return { success: false, error: "Load Failed" };
+            console.warn(`Fetch error for ${code}:`, error);
+            // Return dummy data for testing if real fetch fails? No, show error.
+            return { success: false, error: "Load Err" };
         }
     }
 
